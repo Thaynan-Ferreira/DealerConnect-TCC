@@ -1,0 +1,19 @@
+# Arquivos de Ambiente Virtual
+venv/
+env/
+.env
+
+# Arquivos temporários do Python
+__pycache__/
+*.pyc
+
+# Arquivos de Banco de Dados
+*.sqlite3
+*.mysql
+
+# Arquivos de IDEs e Editores
+.vscode/
+.idea/
+
+# Arquivos de dependências (serão gerenciados por um requirements.txt depois)
+*.egg-info/
