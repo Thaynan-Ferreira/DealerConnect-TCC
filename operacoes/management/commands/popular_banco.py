@@ -1,150 +1,134 @@
-# operacoes/management/commands/popular_banco.py (VERSÃO CORRIGIDA)
-
-import csv
 import os
+import numpy as np
+import pandas as pd
 from django.core.management.base import BaseCommand
-from django.db import IntegrityError, transaction
+from django.db import transaction, IntegrityError
 from produtos.models import Segmento, Veiculo
 from usuarios.models import Pessoa, Cliente, Usuario
 from operacoes.models import Venda
 import re
 
-# Função para limpar CPF/CNPJ (remover pontos, traços, etc.)
 def limpar_cpf(cpf_cnpj):
     return re.sub(r'[^0-9]', '', str(cpf_cnpj))
 
 class Command(BaseCommand):
-    help = 'Limpa as tabelas e popula o banco de dados com os dados dos arquivos CSV'
+    help = 'Limpa e popula o banco de dados com dados reais e sintéticos'
 
+    # Removi o @transaction.atomic daqui para controlar as transações manualmente
     def handle(self, *args, **options):
         self.stdout.write(self.style.WARNING('Limpando o banco de dados...'))
-        # Limpa as tabelas na ordem correta para evitar erros de chave estrangeira
-        Venda.objects.all().delete()
-        Cliente.objects.all().delete()
-        Usuario.objects.all().delete()
-        Pessoa.objects.all().delete()
-        Veiculo.objects.all().delete()
-        Segmento.objects.all().delete()
+        # A limpeza precisa ser feita em uma única transação
+        with transaction.atomic():
+            Venda.objects.all().delete()
+            Cliente.objects.all().delete()
+            Usuario.objects.all().delete()
+            Pessoa.objects.all().delete()
+            Veiculo.objects.all().delete()
+            Segmento.objects.all().delete()
         self.stdout.write(self.style.SUCCESS('Banco de dados limpo.'))
         
         self.stdout.write(self.style.SUCCESS('Iniciando o processo de povoamento...'))
-
-        # --- ORDEM DE IMPORTAÇÃO ---
         self.importar_segmentos_e_veiculos()
-        self.importar_pessoas_clientes_usuarios()
+        
+        clientes_reais_df = self.importar_pessoas_reais()
+        self.gerar_leads_sinteticos(clientes_reais_df)
         self.importar_vendas()
 
         self.stdout.write(self.style.SUCCESS('Banco de dados povoado com sucesso!'))
 
     def importar_segmentos_e_veiculos(self):
-        self.stdout.write('1/3 - Importando Segmentos e Veículos...')
+        self.stdout.write('1/4 - Importando Segmentos e Veículos...')
         caminho_csv = os.path.join(os.getcwd(), 'modelos_segmentados.csv')
-        
-        # CORREÇÃO APLICADA: encoding='utf-8-sig'
-        with open(caminho_csv, 'r', encoding='utf-8-sig') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                segmento, _ = Segmento.objects.get_or_create(nome_segmento=row['Segmento'])
-                Veiculo.objects.get_or_create(
-                    modelo=row['Modelo'],
-                    defaults={'segmento': segmento, 'marca': 'Honda'}
-                )
-        self.stdout.write(self.style.SUCCESS('Segmentos e Veículos importados.'))
+        df = pd.read_csv(caminho_csv, encoding='utf-8-sig')
+        for _, row in df.iterrows():
+            Segmento.objects.get_or_create(nome_segmento=row['Segmento'])
+            Veiculo.objects.get_or_create(modelo=row['Modelo'], defaults={'segmento': Segmento.objects.get(nome_segmento=row['Segmento']), 'marca': 'Honda'})
+        self.stdout.write(self.style.SUCCESS(f'{Veiculo.objects.count()} veículos importados.'))
 
-    def importar_pessoas_clientes_usuarios(self):
-        self.stdout.write('2/3 - Importando Pessoas, Clientes e Usuários...')
+    def importar_pessoas_reais(self):
+        self.stdout.write('2/4 - Importando Pessoas e Clientes Reais...')
         caminho_csv = os.path.join(os.getcwd(), 'tabela_pessoa_para_banco.csv')
+        df = pd.read_csv(caminho_csv, encoding='utf-8-sig')
 
-        # CORREÇÃO APLICADA: encoding='utf-8-sig'
-        with open(caminho_csv, 'r', encoding='utf-8-sig') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # CORREÇÃO PARA NOMES DAS COLUNAS: '\ufeffNome' e ' CPF' (com espaço)
-                nome_coluna = next(iter(row)) # Pega o nome da primeira coluna, seja ele qual for
-                nome = row[nome_coluna]
-                cpf_bruto = row.get('CPF') or row.get(' CPF') # Tenta pegar com e sem espaço
+        clientes_reais_df = df[df['Tipo'] == 'Cliente'].copy()
+        clientes_reais_df['Municipio'] = clientes_reais_df['Municipio'].fillna('Desconhecido').replace('', 'Desconhecido')
+        clientes_reais_df.dropna(subset=['Idade'], inplace=True)
+        
+        np.random.seed(42)
+        media_compradores = 7.5
+        desvio_compradores = 1.5
+        scores_reais = np.random.normal(loc=media_compradores, scale=desvio_compradores, size=len(clientes_reais_df))
+        clientes_reais_df['lead_score'] = np.clip(scores_reais, 1, 10).astype(int)
 
-                if not cpf_bruto or not nome or nome.lower() == 'nan':
-                    continue
+        for _, row in df.iterrows():
+            # Cada tentativa de criar uma pessoa agora está em sua própria "caixa de transação".
+            try:
+                with transaction.atomic(): # Inicia a "caixa"
+                    cpf_limpo = limpar_cpf(row['CPF'])
+                    if not cpf_limpo or pd.isna(row['Nome']) or row['Nome'].lower() == 'nan':
+                        continue
+                    
+                    score_row = clientes_reais_df.loc[clientes_reais_df['CPF'].apply(limpar_cpf) == cpf_limpo, 'lead_score']
+                    score = score_row.iloc[0] if not score_row.empty else 5
 
-                cpf_limpo = limpar_cpf(cpf_bruto)
-                if not cpf_limpo:
-                    continue
-
-                try:
-                    pessoa, created = Pessoa.objects.get_or_create(
-                        cpf_cnpj=cpf_limpo,
-                        defaults={
-                            'nome': nome,
-                            'email': row['Email'] if row['Email'] else None,
-                            'telefone': row['Telefone'],
-                            'endereco': row['Municipio'],
-                            'idade': int(float(row['Idade'])) if row['Idade'] else None,
-                        }
+                    pessoa = Pessoa.objects.create(
+                        cpf_cnpj=cpf_limpo, nome=row['Nome'], email=row['Email'], telefone=row['Telefone'],
+                        endereco=row['Municipio'] if pd.notna(row['Municipio']) else 'Desconhecido',
+                        idade=int(row['Idade']) if pd.notna(row['Idade']) else None,
+                        lead_score=score
                     )
                     
                     if row['Tipo'] == 'Cliente':
-                        Cliente.objects.get_or_create(pessoa=pessoa)
+                        Cliente.objects.create(pessoa=pessoa)
                     elif row['Tipo'] == 'Usuario':
-                        Usuario.objects.get_or_create(
-                            pessoa=pessoa,
-                            defaults={
-                                'senha_hash': 'senha_padrao_123',
-                                'perfil': Usuario.Perfil.VENDEDOR
-                            }
-                        )
-                except IntegrityError:
-                    self.stdout.write(self.style.WARNING(f'Pessoa com CPF {cpf_limpo} já existe ou e-mail duplicado. Pulando.'))
-                except Exception as e:
-                    self.stdout.write(self.style.ERROR(f"Erro ao processar linha: {row} - {e}"))
-        self.stdout.write(self.style.SUCCESS('Pessoas, Clientes e Usuários importados.'))
-
-    @transaction.atomic
-    def importar_vendas(self):
-        self.stdout.write('3/3 - Importando Vendas...')
-        caminho_csv = os.path.join(os.getcwd(), 'vendas_processado.csv')
+                        Usuario.objects.create(pessoa=pessoa, senha_hash='senha_padrao', perfil='VENDEDOR')
+            
+            except IntegrityError:
+                # Se der erro aqui dentro, apenas esta "caixa" é descartada.
+                # O script pode continuar para a próxima pessoa com uma "caixa" limpa.
+                self.stdout.write(self.style.WARNING(f"Pessoa com CPF {limpar_cpf(row['CPF'])} ou Email {row['Email']} já existe. Pulando."))
+                continue
         
-        pessoa_sistema, _ = Pessoa.objects.get_or_create(
-            cpf_cnpj='00000000000', defaults={'nome': 'Sistema / CNH'}
-        )
-        vendedor_sistema, _ = Usuario.objects.get_or_create(
-            pessoa=pessoa_sistema, defaults={'senha_hash': 'sistema', 'perfil': Usuario.Perfil.SISTEMA}
-        )
+        self.stdout.write(self.style.SUCCESS(f'{Pessoa.objects.count()} pessoas reais importadas.'))
+        return clientes_reais_df
 
-        # CORREÇÃO APLICADA: encoding='utf-8-sig'
-        with open(caminho_csv, 'r', encoding='utf-8-sig') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                try:
-                    cliente_nome = row['Cliente']
-                    vendedor_nome = row['Vendedor']
-                    veiculo_modelo = row['Veículo']
-                    
-                    if not cliente_nome or not veiculo_modelo:
-                        continue
+    def gerar_leads_sinteticos(self, clientes_reais_df):
+        self.stdout.write('3/4 - Gerando Leads Sintéticos (Não-Compradores)...')
+        if clientes_reais_df.empty:
+            self.stdout.write(self.style.WARNING("Nenhum cliente real encontrado para basear a geração de leads sintéticos. Pulando esta etapa."))
+            return
+        
+        num_falsos = len(clientes_reais_df)
+        np.random.seed(42)
+        idades_falsas = np.random.normal(loc=clientes_reais_df['Idade'].mean(), scale=clientes_reais_df['Idade'].std(), size=num_falsos).astype(int)
+        idades_falsas = np.clip(idades_falsas, 18, 80)
+        municipios_falsos = np.random.choice(clientes_reais_df['Municipio'].unique(), size=num_falsos)
+        media_nao_compradores = 3.5
+        desvio_nao_compradores = 1.5
+        scores_falsos = np.random.normal(loc=media_nao_compradores, scale=desvio_nao_compradores, size=num_falsos)
+        scores_falsos = np.clip(scores_falsos, 1, 10).astype(int)
+        novos_leads = []
+        for i in range(num_falsos):
+            novos_leads.append(Pessoa(
+                nome=f"Lead Sintético {i}", cpf_cnpj=f"000000000{i:02}",
+                endereco=municipios_falsos[i], idade=idades_falsas[i], lead_score=scores_falsos[i]
+            ))
+        Pessoa.objects.bulk_create(novos_leads)
+        self.stdout.write(self.style.SUCCESS(f'{len(novos_leads)} leads sintéticos criados.'))
 
-                    cliente_obj = Cliente.objects.filter(pessoa__nome=cliente_nome).first()
-                    if not cliente_obj:
-                        self.stdout.write(self.style.WARNING(f"Cliente '{cliente_nome}' não encontrado. Pulando venda."))
-                        continue
-                    
-                    veiculo_obj = Veiculo.objects.filter(modelo=veiculo_modelo).first()
-                    if not veiculo_obj:
-                        self.stdout.write(self.style.WARNING(f"Veículo '{veiculo_modelo}' não encontrado. Pulando venda."))
-                        continue
-                    
-                    vendedor_obj = Usuario.objects.filter(pessoa__nome=vendedor_nome).first()
-                    if not vendedor_obj:
-                        vendedor_obj = vendedor_sistema
-
-                    Venda.objects.create(
-                        cliente=cliente_obj,
-                        veiculo=veiculo_obj,
-                        vendedor=vendedor_obj,
-                        data_venda=row['Data'],
-                        valor_final=0, 
-                        tipo_pagamento=row['Forma de venda']
-                    )
-                except Exception as e:
-                    self.stdout.write(self.style.ERROR(f"Erro ao importar venda: {row} - {e}"))
-        self.stdout.write(self.style.SUCCESS('Vendas importadas.'))
+    def importar_vendas(self):
+        self.stdout.write('4/4 - Importando Vendas...')
+        caminho_csv = os.path.join(os.getcwd(), 'vendas_processado.csv')
+        df_vendas = pd.read_csv(caminho_csv, encoding='utf-8-sig')
+        pessoa_sistema, _ = Pessoa.objects.get_or_create(cpf_cnpj='000SYSTEM000', defaults={'nome': 'Sistema / CNH'})
+        vendedor_sistema, _ = Usuario.objects.get_or_create(pessoa=pessoa_sistema, defaults={'senha_hash': 'sistema', 'perfil': 'SISTEMA'})
+        for _, row in df_vendas.iterrows():
+            cliente_obj = Cliente.objects.filter(pessoa__nome=row['Cliente']).first()
+            veiculo_obj = Veiculo.objects.filter(modelo=row['Veículo']).first()
+            vendedor_obj = Usuario.objects.filter(pessoa__nome=row['Vendedor']).first() or vendedor_sistema
+            if cliente_obj and veiculo_obj:
+                Venda.objects.create(
+                    cliente=cliente_obj, veiculo=veiculo_obj, vendedor=vendedor_obj,
+                    data_venda=row['Data'], valor_final=0, tipo_pagamento=row['Forma de venda']
+                )
+        self.stdout.write(self.style.SUCCESS(f'{Venda.objects.count()} vendas importadas.'))

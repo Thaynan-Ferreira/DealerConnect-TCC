@@ -7,8 +7,11 @@ class Pessoa(models.Model):
     email = models.EmailField(max_length=100, blank=True, null=True, unique=True)
     telefone = models.CharField(max_length=20, blank=True, null=True)
     endereco = models.CharField(max_length=255, blank=True, null=True)
-    # Trocamos data_nascimento por idade
     idade = models.IntegerField(null=True, blank=True)
+    lead_score = models.IntegerField(
+        default=5, 
+        verbose_name="Pontuação do Lead"
+    )
 
     def __str__(self):
         return self.nome
@@ -18,13 +21,39 @@ class Pessoa(models.Model):
         verbose_name_plural = "Pessoas"
 
 class Cliente(models.Model):
+    # Classe interna para as opções de Situação do Atendimento
+    class SituacaoAtendimento(models.TextChoices):
+        NOVO_CONTATO = 'NOVO', 'Novo Contato'
+        EM_NEGOCIACAO = 'NEGOCIANDO', 'Em Negociação'
+        VENDA_REALIZADA = 'VENDIDO', 'Venda Realizada'
+        PERDIDO = 'PERDIDO', 'Perdido'
+
+    # Classe interna para as opções de Classificação
+    class ClassificacaoCliente(models.TextChoices):
+        ALTO_POTENCIAL = 'ALTO', 'Potencial Alto'
+        POTENCIAL_PADRAO = 'PADRAO', 'Potencial Padrão'
+        NAO_CLASSIFICADO = 'N/A', 'Não Classificado'
+
     pessoa = models.OneToOneField(
         Pessoa, 
         on_delete=models.CASCADE, 
         primary_key=True
     )
-    # Removido o ManyToMany com Segmento daqui
+    classificacao = models.CharField(
+        max_length=10,
+        choices=ClassificacaoCliente.choices,
+        default=ClassificacaoCliente.NAO_CLASSIFICADO,
+        verbose_name="Classificação de Potencial"
+    )
 
+    # Este campo armazenará o status atual do relacionamento com o cliente.
+    situacao = models.CharField(
+        max_length=10,
+        choices=SituacaoAtendimento.choices,
+        default=SituacaoAtendimento.NOVO_CONTATO,
+        verbose_name="Situação do Atendimento"
+    )
+    
     @property
     def nome(self):
         return self.pessoa.nome

@@ -1,0 +1,12 @@
+# Dependências do Django
+django
+djangorestframework
+django-filter
+django-cors-headers
+mysqlclient
+
+# Dependências de ML (Sincronizadas com o Colab)
+scikit-learn==1.6.1
+pandas==2.2.2
+numpy==2.0.2
+joblib==1.5.2
