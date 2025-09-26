@@ -9,7 +9,7 @@ from rest_framework.response import Response # Para enviar respostas JSON custom
 import joblib # Para carregar o modelo de ML
 import pandas as pd # Para formatar os dados para o modelo
 from .models import Cliente, Pessoa # Importamos Pessoa para acessar seus dados
-from .serializers import ClienteSerializer
+from .serializers import ClienteSerializer, ClienteCreateSerializer
 
 
 
@@ -26,7 +26,19 @@ class ClienteViewSet(viewsets.ModelViewSet):
     filterset_fields = ['pessoa__cpf_cnpj']
     search_fields = ['pessoa__nome', 'pessoa__cpf_cnpj']
     
-    # --- CÓDIGO NOVO (Ação 'classificar') ---
+    def get_serializer_class(self):
+        """
+        Esta função especial permite que a gente use serializers diferentes
+        para ações diferentes.
+        """
+        # Se a ação for 'create' (ou seja, um POST para /api/clientes/),
+        if self.action == 'create':
+            # use o nosso novo serializer de escrita.
+            return ClienteCreateSerializer
+        # Para todas as outras ações (list, retrieve, update, etc.),
+        # continue usando o serializer de leitura padrão.
+        return ClienteSerializer
+    
     # Este é o código que cria o endpoint para usar o modelo de ML.
     @action(detail=True, methods=['post'])
     def classificar(self, request, pk=None):
